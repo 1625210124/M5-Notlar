@@ -48,6 +48,7 @@ struct Line     { String t; uint16_t c; };
 struct NoteMeta { uint32_t id; String date; String title; };
 struct Turn     { String role; String text; };
 struct Input    { bool sel, aPress, next, back, physBHold; int key; };
+struct WifiNet  { String ssid; int rssi; bool enc; };
 
 uint8_t scrRot = 0;                      // ekran yonu (Ayarlar'dan)
 uint8_t keyRot = 0;                      // keypad yonu: 0, 90, 180, 270 derece saat yonu (Ayarlar'dan)
@@ -165,7 +166,7 @@ bool notesDirty = false;
 uint32_t viewNoteId = 0, delArm = 0;
 std::vector<Turn> hist;
 
-enum Screen { SC_MENU, SC_NOTES, SC_NOTE_VIEW, SC_GEM_MENU, SC_CHAT, SC_KB, SC_NET, SC_SETTINGS, SC_KEYS, SC_GAME };
+enum Screen { SC_MENU, SC_NOTES, SC_NOTE_VIEW, SC_GEM_MENU, SC_CHAT, SC_KB, SC_NET, SC_SETTINGS, SC_KEYS, SC_GAME, SC_WIFI };
 Screen screen = SC_MENU;
 bool dirty = true;
 int menuIdx = 0, gemIdx = 0, setIdx = 0;
@@ -174,8 +175,11 @@ M5Canvas canvas(&M5.Display);          // cift tampon: ekran titremesin (blink o
 String curTitle;
 uint32_t lastHdr = 0;
 
-enum KbPurpose { KB_GEMINI, KB_NOTE };
+enum KbPurpose { KB_GEMINI, KB_NOTE, KB_WIFI };
 KbPurpose kbPurpose = KB_GEMINI;
+String wifiSel;                          // sifresi girilen ag
+std::vector<WifiNet> wifiNets;           // cihazdan taranan aglar
+int wifiIdx = 0;
 String kbText;
 int kbR = 1, kbC = 0, kbLayer = 0;
 bool chatVoice = false;
@@ -913,12 +917,21 @@ void pageScroll() {                      // B: bir sayfa asagi, sonda basa don
 void drawKeyboard() {
   auto& d = canvas;
   const char* lay[3] = {"abc", "ABC", "#+="};
-  drawHeader(String(kbPurpose == KB_NOTE ? "Yeni Not " : "Gemini ") + "[" + lay[kbLayer] + "]");
+  const char* kbName = (kbPurpose == KB_NOTE) ? "Yeni Not " : (kbPurpose == KB_WIFI ? "Sifre " : "Gemini ");
+  drawHeader(String(kbName) + "[" + lay[kbLayer] + "]");
   int W = d.width(), H = d.height();
   int cw = W / 10;
   int ch = (H > W) ? 24 : 19;
   int kbTop = H - 4 * ch - 2;
-  int maxLines = (kbTop - 22) / 16;
+  int topY = 20;
+  if (kbPurpose == KB_WIFI) {            // hangi aga sifre yazildigini goster
+    d.setFont(&fonts::Font2);
+    d.setTextColor(TFT_CYAN, TFT_BLACK);
+    d.setTextDatum(top_left);
+    d.drawString(fitText(wifiSel, W - 8), 4, 20);
+    topY = 36;
+  }
+  int maxLines = (kbTop - topY - 2) / 16;
   if (maxLines < 1) maxLines = 1;
   std::vector<Line> tl;
   wrapText(kbText + "_", TFT_WHITE, W - 8, tl);
@@ -926,7 +939,7 @@ void drawKeyboard() {
   d.setTextColor(TFT_WHITE, TFT_BLACK);
   d.setTextDatum(top_left);
   int start = (int)tl.size() > maxLines ? (int)tl.size() - maxLines : 0;
-  for (int i = start; i < (int)tl.size(); i++) d.drawString(tl[i].t, 4, 20 + (i - start) * 16);
+  for (int i = start; i < (int)tl.size(); i++) d.drawString(tl[i].t, 4, topY + (i - start) * 16);
   d.setTextDatum(middle_center);
   int x0 = (W - cw * 10) / 2;
   for (int r = 0; r < 4; r++) {
@@ -1034,6 +1047,7 @@ void render() {
     case SC_SETTINGS: {
       std::vector<String> it;
       it.push_back("Ag Bilgisi");
+      it.push_back("WiFi Ekle");
       it.push_back("WiFi Kurulum (AP)");
       it.push_back("Tuslar");
       it.push_back("Parlaklik: " + String(brightness));
@@ -1043,6 +1057,13 @@ void render() {
         it.push_back("Keypad: " + String((keyRot & 3) * 90) + " derece");
       }
       drawList("Ayarlar", it, setIdx);
+      break;
+    }
+    case SC_WIFI: {
+      std::vector<String> it;
+      for (auto& n : wifiNets) it.push_back(n.ssid + (n.enc ? " *" : ""));
+      it.push_back("[Yeniden tara]");
+      drawList("WiFi Sec", it, wifiIdx);
       break;
     }
     case SC_KEYS:
@@ -1172,6 +1193,11 @@ void doVoice() {
 }
 
 void sendKb() {
+  if (kbPurpose == KB_WIFI) {            // sifre girildi: aga baglan
+    if (!kbText.length()) return;
+    wifiConnectFlow(wifiSel, kbText);
+    return;
+  }
   String q = kbText;
   q.trim();
   if (!q.length()) return;
@@ -1416,6 +1442,75 @@ void gameIdle() {                        // hazir ekraninda basili sutunu canli 
   if (cur != gReadyCols) { gReadyCols = cur; dirty = true; }
 }
 
+// ---------------- CIHAZDAN WIFI EKLE ----------------
+void wifiScanList() {
+  int n = WiFi.scanNetworks();
+  wifiNets.clear();
+  for (int i = 0; i < n; i++) {
+    String sd = WiFi.SSID(i);
+    if (!sd.length()) continue;
+    int rssi = WiFi.RSSI(i);
+    bool enc = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+    bool found = false;
+    for (auto& w : wifiNets) {
+      if (w.ssid == sd) { found = true; if (rssi > w.rssi) { w.rssi = rssi; w.enc = enc; } break; }
+    }
+    if (!found) { WifiNet w; w.ssid = sd; w.rssi = rssi; w.enc = enc; wifiNets.push_back(w); }
+  }
+  WiFi.scanDelete();
+  std::sort(wifiNets.begin(), wifiNets.end(), [](const WifiNet& a, const WifiNet& b) { return a.rssi > b.rssi; });
+}
+
+bool wifiTryConnect(const String& sd, const String& pw) {
+  WiFi.setHostname(HOSTNAME);
+  WiFi.disconnect(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(false);
+  WiFi.begin(sd.c_str(), pw.c_str());
+  uint32_t t = millis();
+  int dots = 0;
+  while (WiFi.status() != WL_CONNECTED && millis() - t < 15000) {
+    delay(300);
+    M5.update();
+    if (M5.BtnB.isPressed()) break;                       // B'ye basarak vazgec
+    if (WiFi.status() == WL_CONNECT_FAILED) break;        // sifre yanlis
+    toast("Baglaniyor" + String("...").substring(0, (dots++ % 3) + 1), TFT_CYAN, 0);
+  }
+  return WiFi.status() == WL_CONNECTED;
+}
+
+void wifiRestoreOld() {                  // basarisiz olursa kayitli aga geri don
+  prefs.begin("net", true);
+  String os = prefs.getString("ssid", "");
+  String op = prefs.getString("pass", "");
+  prefs.end();
+  staLostSince = 0;
+  if (os.length()) WiFi.begin(os.c_str(), op.c_str());
+}
+
+void wifiConnectFlow(const String& sd, const String& pw) {
+  bool wasAp = apMode;
+  if (wifiTryConnect(sd, pw)) {
+    saveCreds(sd, pw);                   // sonraki acilislarda otomatik baglanir
+    apMode = false;
+    dns.stop();
+    connState = CS_IDLE;
+    staLostSince = 0;
+    configTzTime("<+03>-3", "pool.ntp.org", "time.google.com");
+    MDNS.end();
+    if (MDNS.begin(HOSTNAME)) MDNS.addService("http", "tcp", 80);
+    kbText = "";
+    toast("Baglandi!", TFT_GREEN, 900);
+    screen = SC_NET;
+  } else {
+    if (wasAp) startAP(); else wifiRestoreOld();
+    toast("Baglanamadi. Sifreyi kontrol et", TFT_RED, 1800);
+    screen = pw.length() ? SC_KB : SC_WIFI;               // sifre ekranina don, yazilan korunur
+  }
+  dirty = true;
+}
+
 // ---------------- GIRIS ISLEME ----------------
 void applyScreenRotation() {             // yonu uygular, tamponu yeni olcuyle yeniden kurar
   M5.Display.setRotation(scrRot & 3);
@@ -1534,19 +1629,20 @@ void handleInput(const Input& in) {
       if (k == 9) { kbLayer = (kbLayer == 2) ? 0 : 2; dirty = true; }   // semboller
       if (k == 10) { kbText = ""; dirty = true; }                       // hepsini sil
       if (k == 4) sendKb();                                            // gonder / kaydet
-      if (in.back) { screen = (kbPurpose == KB_NOTE) ? SC_MENU : SC_GEM_MENU; dirty = true; }
+      if (in.back) { screen = (kbPurpose == KB_NOTE) ? SC_MENU : (kbPurpose == KB_WIFI ? SC_WIFI : SC_GEM_MENU); dirty = true; }
       break;
     }
     case SC_SETTINGS: {
-      const int N = 6;
+      const int N = 7;
       if (nx) { setIdx = (setIdx + 1) % N; dirty = true; }
       if (pv) { setIdx = (setIdx + N - 1) % N; dirty = true; }
       if (ok) {
         switch (setIdx) {
           case 0: screen = SC_NET; break;
-          case 1: toast("AP aciliyor...", TFT_CYAN, 0); startAP(); screen = SC_NET; break;
-          case 2: keysHelp(); screen = SC_KEYS; break;
-          case 3: {
+          case 1: toast("Taraniyor...", TFT_CYAN, 0); wifiScanList(); wifiIdx = 0; screen = SC_WIFI; break;
+          case 2: toast("AP aciliyor...", TFT_CYAN, 0); startAP(); screen = SC_NET; break;
+          case 3: keysHelp(); screen = SC_KEYS; break;
+          case 4: {
             int cur = 0;
             for (int i = 0; i < 5; i++) if (BR_LEVELS[i] == brightness) cur = i;
             cur = (cur + 1) % 5;
@@ -1557,14 +1653,14 @@ void handleInput(const Input& in) {
             prefs.end();
             break;
           }
-          case 4:                            // ekran yonu: 0 -> 1 -> 2 -> 3
+          case 5:                            // ekran yonu: 0 -> 1 -> 2 -> 3
             scrRot = (scrRot + 1) & 3;
             applyScreenRotation();
             prefs.begin("cfg", false);
             prefs.putUChar("rot", scrRot);
             prefs.end();
             break;
-          case 5:                            // keypad yonu: 0 -> 90 -> 180 -> 270
+          case 6:                            // keypad yonu: 0 -> 90 -> 180 -> 270
             keyRot = (keyRot + 1) & 3;
             prefs.begin("cfg", false);
             prefs.putUChar("krot", keyRot);
@@ -1574,6 +1670,28 @@ void handleInput(const Input& in) {
         dirty = true;
       }
       if (bk) { screen = SC_MENU; dirty = true; }
+      break;
+    }
+    case SC_WIFI: {
+      int N = (int)wifiNets.size() + 1;      // son oge: yeniden tara
+      if (nx) { wifiIdx = (wifiIdx + 1) % N; dirty = true; }
+      if (pv) { wifiIdx = (wifiIdx + N - 1) % N; dirty = true; }
+      if (ok) {
+        if (wifiIdx >= (int)wifiNets.size()) {
+          toast("Taraniyor...", TFT_CYAN, 0);
+          wifiScanList();
+          wifiIdx = 0;
+        } else if (wifiNets[wifiIdx].enc) {          // sifreli ag: klavyeyle sifre yaz
+          wifiSel = wifiNets[wifiIdx].ssid;
+          kbPurpose = KB_WIFI; kbText = ""; kbLayer = 0;
+          screen = SC_KB;
+        } else {                                     // acik ag: sifresiz baglan
+          wifiSel = wifiNets[wifiIdx].ssid;
+          wifiConnectFlow(wifiSel, "");
+        }
+        dirty = true;
+      }
+      if (bk) { screen = SC_SETTINGS; dirty = true; }
       break;
     }
     case SC_GAME: {
