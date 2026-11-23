@@ -25,7 +25,7 @@
 #include <time.h>
 
 // ---------------- AYARLAR ----------------
-#define GEMINI_API_KEY   "AQ.Ab8RN6I43J-ahQvZW-pt5borERamjNKUD3QSUrdgQy1axni3UA"
+#define GEMINI_API_KEY   "AQ.Ab8RN6IA9xsrKEN2JtfrntIBm6Ku29SEE9TheGlpOIcs6UEODA"
 #define GEMINI_MODEL     "gemini-3.5-flash-lite"
 
 #define AP_SSID          "M5Notes-Setup"
@@ -194,6 +194,7 @@ const char* KB[3][4] = {
 const char* MAIN_ITEMS[] = {"Notlar", "Yeni Not", "Gemini", "Piyano", "Ayarlar"};
 const uint8_t BR_LEVELS[] = {30, 70, 120, 180, 255};
 const char* GEM_ITEMS[]  = {"Sesli", "Klavye", "Sohbeti Sifirla"};
+bool gemSearch = true;                   // Gemini internet (Google Arama) kullansin
 
 // ---------------- WEB SAYFALARI ----------------
 const char NOTES_HTML[] PROGMEM = R"rawliteral(<!doctype html><html><head><meta charset=utf-8>
@@ -678,11 +679,22 @@ String bodyPrefix(bool voice) {
   String sys = "Sen M5StickS3 adli kucuk bir cihazda calisan yardimci asistansin. "
                "Kullanicinin dilinde cevap ver (genelde Turkce). Ekran cok kucuk: cevaplar kisa, net ve duz metin olsun; "
                "markdown, emoji ve ozel sembol kullanma.";
-  if (voice) sys += " Kullanici sesli mesaj gonderiyor: once ne dedigini 'transcript' alanina yaz, cevabini 'reply' alanina yaz.";
+  String now = nowStr();
+  if (now.length()) sys += " Simdiki tarih ve saat (Turkiye): " + now + ".";
+  if (gemSearch) sys += " Guncel veya bilmedigin bir bilgi gerekirse internette ara ve sonucu kisaca ozetle.";
+  if (voice) {
+    if (gemSearch)
+      sys += " Kullanici sesli mesaj gonderiyor. Cevabi tam su bicimde ver: ilk satir 'S: ' ile baslayip kullanicinin soyledigini yaz, "
+             "sonraki satirlar 'C: ' ile baslayip cevabi yaz.";
+    else
+      sys += " Kullanici sesli mesaj gonderiyor: once ne dedigini 'transcript' alanina yaz, cevabini 'reply' alanina yaz.";
+  }
   return "{\"systemInstruction\":{\"parts\":[{\"text\":" + jsonQuote(sys) + "}]},\"contents\":[" + histJson();
 }
 
 String bodySuffix(bool voice) {
+  // Google Arama acikken yapilandirilmis (JSON) cikti kullanilmaz; sesli modda S:/C: bicimi istenir
+  if (gemSearch) return "],\"tools\":[{\"google_search\":{}}]}";
   if (!voice) return "]}";
   return "],\"generationConfig\":{\"responseMimeType\":\"application/json\",\"responseSchema\":{\"type\":\"OBJECT\","
          "\"properties\":{\"transcript\":{\"type\":\"STRING\"},\"reply\":{\"type\":\"STRING\"}},"
@@ -778,7 +790,17 @@ bool geminiVoice(const uint8_t* wav, size_t wavLen, String& tr, String& reply, S
   String resp;
   int code = geminiPost(buf, len, resp);
   free(buf);
-  if (!parseGemini(code, resp, true, tr, reply, err)) return false;
+  if (!parseGemini(code, resp, !gemSearch, tr, reply, err)) return false;
+  if (gemSearch) {                       // "S: ...  C: ..." bicimini ayir
+    String raw = reply;
+    raw.trim();
+    int cs = raw.indexOf("\nC:");
+    if (cs < 0) cs = raw.indexOf(" C:");
+    if (raw.startsWith("S:") && cs > 0) {
+      tr = raw.substring(2, cs); tr.trim();
+      reply = raw.substring(cs + 3); reply.trim();
+    }
+  }
   pushHist(tr.length() ? tr : String("(sesli mesaj)"), reply);
   return true;
 }
@@ -1031,6 +1053,7 @@ void render() {
     case SC_GEM_MENU: {
       std::vector<String> it;
       for (auto s : GEM_ITEMS) it.push_back(s);
+      it.push_back(String("Internet: ") + (gemSearch ? "acik" : "kapali"));
       drawList("Gemini", it, gemIdx);
       break;
     }
@@ -1587,7 +1610,7 @@ void handleInput(const Input& in) {
       break;
     }
     case SC_GEM_MENU: {
-      const int N = 3;
+      const int N = 4;
       if (nx) { gemIdx = (gemIdx + 1) % N; dirty = true; }
       if (pv) { gemIdx = (gemIdx + N - 1) % N; dirty = true; }
       if (ok) {
@@ -1597,7 +1620,15 @@ void handleInput(const Input& in) {
         } else if (gemIdx == 1) {
           if (!netOnline()) { toast("Internet yok", TFT_RED); }
           else { kbPurpose = KB_GEMINI; kbText = ""; kbLayer = 0; screen = SC_KB; }
-        } else { hist.clear(); toast("Sohbet sifirlandi", TFT_GREEN, 800); }
+        } else if (gemIdx == 2) {
+          hist.clear();
+          toast("Sohbet sifirlandi", TFT_GREEN, 800);
+        } else {                                     // internet aramasi ac / kapat
+          gemSearch = !gemSearch;
+          prefs.begin("cfg", false);
+          prefs.putUChar("gs", gemSearch ? 1 : 0);
+          prefs.end();
+        }
         dirty = true;
       }
       if (bk) { screen = SC_MENU; dirty = true; }
@@ -1732,6 +1763,7 @@ void setup() {
   scrRot = prefs.getUChar("rot", SCREEN_ROTATION) & 3;
   keyRot = prefs.getUChar("krot", 0) & 3;
   gDiff = prefs.getUChar("gd", 1) % 3;
+  gemSearch = prefs.getUChar("gs", 1) != 0;
   for (int i = 0; i < 3; i++) gBest[i] = prefs.getUShort(("hs" + String(i)).c_str(), 0);
   prefs.end();
   M5.Display.setBrightness(brightness);
