@@ -4,6 +4,8 @@
 //  - WiFi'ye otomatik baglanma, baglaninca http://m5notes.local (veya IP)
 //  - Web'den not ekle / sil, cihazdan not oku / yaz
 //  - Gemini: Sesli (A basili tut) veya Klavye (4x4 keypad ile)
+//  - Gemini API anahtari ve model adi kodda YOK: AP kurulum sayfasindan
+//    veya http://m5notes.local sayfasindaki "Gemini Ayarlari"ndan girilir
 //
 //  Kutuphaneler: M5Unified, M5GFX (guncel), ArduinoJson 7.x
 //  Kart: M5StickS3 (yoksa ESP32S3 Dev Module) | PSRAM: OPI PSRAM
@@ -25,9 +27,6 @@
 #include <time.h>
 
 // ---------------- AYARLAR ----------------
-#define GEMINI_API_KEY   "AQ.Ab8RN6IA9xsrKEN2JtfrntIBm6Ku29SEE9TheGlpOIcs6UEODA"
-#define GEMINI_MODEL     "gemini-3.5-flash-lite"
-
 #define AP_SSID          "M5Notes-Setup"
 #define AP_PASS          ""              // bos = acik AP (captive portal icin kolay)
 #define HOSTNAME         "m5notes"       // http://m5notes.local
@@ -195,16 +194,25 @@ const char* MAIN_ITEMS[] = {"Notlar", "Yeni Not", "Gemini", "Piyano", "Ayarlar"}
 const uint8_t BR_LEVELS[] = {30, 70, 120, 180, 255};
 const char* GEM_ITEMS[]  = {"Sesli", "Klavye", "Sohbeti Sifirla"};
 bool gemSearch = true;                   // Gemini internet (Google Arama) kullansin
+String gemKey, gemModel;                 // Gemini API anahtari ve model (web'den girilir, NVS'te saklanir)
 
 // ---------------- WEB SAYFALARI ----------------
 const char NOTES_HTML[] PROGMEM = R"rawliteral(<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1"><title>M5 Notlar</title>
 <style>body{font-family:system-ui,sans-serif;background:#111;color:#eee;max-width:560px;margin:0 auto;padding:16px}
 textarea{width:100%;box-sizing:border-box;height:110px;font-size:16px;padding:10px;border-radius:8px;border:0;background:#222;color:#eee}
+input{width:100%;box-sizing:border-box;font-size:16px;padding:10px;border-radius:8px;border:0;background:#222;color:#eee;margin:6px 0}
+details{background:#1d1d1d;border-radius:10px;padding:12px;margin:0 0 14px}summary{cursor:pointer;font-weight:600}
 button{font-size:16px;padding:10px 16px;border-radius:8px;border:0;background:#2d7ff9;color:#fff;margin:6px 0}
 .n{background:#1d1d1d;border-radius:10px;padding:12px;margin:10px 0}.n p{white-space:pre-wrap;margin:0 0 8px;word-break:break-word}
 .n small{color:#888;display:block}.n button{background:#c0392b;padding:6px 12px;margin:8px 0 0;font-size:14px}</style></head><body>
 <h2>📝 M5 Notlar</h2>
+<details id=gd><summary>✨ Gemini Ayarları</summary>
+<input id=gm placeholder="Model adı">
+<input id=gk type=password placeholder="API anahtarı">
+<button onclick=gemSave()>Gemini'yi kaydet</button>
+<div id=gmsg style="color:#fc6"></div>
+</details>
 <textarea id=t placeholder="Yeni not..." maxlength=1500></textarea>
 <button onclick=add()>Kaydet</button>
 <div id=l></div>
@@ -217,7 +225,11 @@ b.onclick=()=>del(n.id);d.append(p,m,b);l.append(d)});if(!a.length)l.textContent
 async function add(){const t=$('t');if(!t.value.trim())return;
 const r=await fetch('/api/add',{method:'POST',headers:{'Content-Type':'text/plain'},body:t.value});if(!r.ok){alert('Kaydedilemedi: '+await r.text());return}t.value='';load()}
 async function del(id){if(!confirm('Silinsin mi?'))return;await fetch('/api/del?id='+id,{method:'POST'});load()}
-load();
+async function gemLoad(){try{const r=await fetch('/api/gem');const j=await r.json();$('gm').value=j.m||'';
+$('gk').placeholder=j.k?('Kayıtlı: '+j.h+' (değiştirmek için yaz)'):'API anahtarı';if(!j.k||!j.m)$('gd').open=true}catch(e){}}
+async function gemSave(){try{const r=await fetch('/api/gem',{method:'POST',body:new URLSearchParams({model:$('gm').value,key:$('gk').value})});
+$('gmsg').textContent=r.ok?'✅ Kaydedildi':'❌ Kaydedilemedi';$('gk').value='';gemLoad()}catch(e){$('gmsg').textContent='❌ Hata'}}
+load();gemLoad();
 </script></body></html>)rawliteral";
 
 const char PORTAL_HTML[] PROGMEM = R"rawliteral(<!doctype html><html><head><meta charset=utf-8>
@@ -234,6 +246,12 @@ input{background:#222;color:#eee}button{background:#2d7ff9;color:#fff}
 <input id=p type=password placeholder="Şifre">
 <button onclick=go()>Bağlan</button>
 <div id=m></div>
+<hr style="border:0;border-top:1px solid #333;margin:18px 0">
+<h3>✨ Gemini Ayarları</h3>
+<input id=gm placeholder="Model adı">
+<input id=gk type=password placeholder="API anahtarı">
+<button onclick=gemSave()>Gemini'yi kaydet</button>
+<div id=gmsg style="color:#fc6"></div>
 <script>
 const $=i=>document.getElementById(i);
 async function scan(re){$('l').textContent='Taranıyor...';
@@ -247,7 +265,11 @@ try{await fetch('/connect',{method:'POST',body:new URLSearchParams({ssid:s,pass:
 async function poll(){try{const r=await fetch('/status');const j=await r.json();
 if(j.s=='ok'){$('m').textContent='✅ Bağlandı! IP: '+j.ip+' — cihaz yeniden başlıyor. Telefonu normal Wi-Fi ağına geçirip http://m5notes.local veya http://'+j.ip+' adresini aç.';return}
 if(j.s=='fail'){$('m').textContent='❌ Bağlanamadı, şifreyi kontrol et.';return}}catch(e){}setTimeout(poll,1500)}
-scan(0);
+async function gemLoad(){try{const r=await fetch('/api/gem');const j=await r.json();$('gm').value=j.m||'';
+$('gk').placeholder=j.k?('Kayıtlı: '+j.h+' (değiştirmek için yaz)'):'API anahtarı'}catch(e){}}
+async function gemSave(){try{const r=await fetch('/api/gem',{method:'POST',body:new URLSearchParams({model:$('gm').value,key:$('gk').value})});
+$('gmsg').textContent=r.ok?'✅ Kaydedildi':'❌ Kaydedilemedi';$('gk').value='';gemLoad()}catch(e){$('gmsg').textContent='❌ Hata'}}
+scan(0);gemLoad();
 </script></body></html>)rawliteral";
 
 // ---------------- YARDIMCI ----------------
@@ -616,6 +638,33 @@ void apiStatus() {
   server.send(200, "application/json", String("{\"s\":\"") + st + "\",\"ip\":\"" + ip + "\"}");
 }
 
+void apiGemGet() {
+  JsonDocument doc;
+  doc["m"] = gemModel;
+  doc["k"] = gemKey.length() > 0;                       // anahtar var mi (kendisi gonderilmez)
+  doc["h"] = gemKey.length() > 4 ? String("...") + gemKey.substring(gemKey.length() - 4) : String("");
+  String out;
+  serializeJson(doc, out);
+  server.send(200, "application/json", out);
+}
+
+void apiGemSet() {
+  if (server.hasArg("model")) {
+    String m = server.arg("model");
+    m.trim();
+    if (m.startsWith("models/")) m = m.substring(7);
+    gemModel = m;
+  }
+  String k = server.arg("key");
+  k.trim();
+  if (k.length()) gemKey = k;                           // bos birakilirsa eski anahtar korunur
+  prefs.begin("cfg", false);
+  prefs.putString("gmodel", gemModel);
+  prefs.putString("gkey", gemKey);
+  prefs.end();
+  server.send(200, "application/json", "{\"ok\":1}");
+}
+
 void startWeb() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/notes", HTTP_GET, []() { server.send_P(200, "text/html", NOTES_HTML); });
@@ -626,6 +675,8 @@ void startWeb() {
   server.on("/rescan", HTTP_GET, []() { doScan(); server.send(200, "application/json", scanJson); });
   server.on("/connect", HTTP_POST, apiConnect);
   server.on("/status", HTTP_GET, apiStatus);
+  server.on("/api/gem", HTTP_GET, apiGemGet);
+  server.on("/api/gem", HTTP_POST, apiGemSet);
   server.onNotFound(handleNotFound);
   server.begin();
 }
@@ -702,13 +753,17 @@ String bodySuffix(bool voice) {
 }
 
 int geminiPost(const uint8_t* payload, size_t len, String& out) {
+  if (!gemKey.length() || !gemModel.length()) {
+    out = "API anahtari/model girilmemis (web sayfasindan gir)";
+    return -1;
+  }
   WiFiClientSecure client;
   client.setInsecure();                  // sertifika dogrulama yok (basit tutmak icin)
   HTTPClient http;
-  String url = String("https://generativelanguage.googleapis.com/v1beta/models/") + GEMINI_MODEL + ":generateContent";
+  String url = String("https://generativelanguage.googleapis.com/v1beta/models/") + gemModel + ":generateContent";
   if (!http.begin(client, url)) return -1;
   http.addHeader("Content-Type", "application/json");
-  http.addHeader("x-goog-api-key", GEMINI_API_KEY);
+  http.addHeader("x-goog-api-key", gemKey);
   http.setConnectTimeout(15000);
   http.setTimeout(60000);
   int code = http.POST((uint8_t*)payload, len);
@@ -995,6 +1050,8 @@ void drawNet() {
     wrapText("IP: " + WiFi.localIP().toString(), TFT_CYAN, WRAPW, v);
     wrapText("http://" HOSTNAME ".local", TFT_CYAN, WRAPW, v);
     wrapText("Notlar: / veya /notes", TFT_DARKGREY, WRAPW, v);
+    bool gOk = gemKey.length() && gemModel.length();
+    wrapText(gOk ? "Gemini: hazir" : "Gemini: web'den ayarla", gOk ? TFT_GREEN : TFT_ORANGE, WRAPW, v);
   }
   d.setFont(&fonts::Font2);
   d.setTextDatum(top_left);
@@ -1764,6 +1821,8 @@ void setup() {
   keyRot = prefs.getUChar("krot", 0) & 3;
   gDiff = prefs.getUChar("gd", 1) % 3;
   gemSearch = prefs.getUChar("gs", 1) != 0;
+  gemKey   = prefs.getString("gkey", "");
+  gemModel = prefs.getString("gmodel", "");
   for (int i = 0; i < 3; i++) gBest[i] = prefs.getUShort(("hs" + String(i)).c_str(), 0);
   prefs.end();
   M5.Display.setBrightness(brightness);
